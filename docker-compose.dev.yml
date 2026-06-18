@@ -1,0 +1,63 @@
+# ===== Backend dev stack (HOT RELOAD): Postgres + NestJS watch =====
+# Chạy (trong thư mục backend/):  docker compose -f docker-compose.dev.yml up
+# - Sửa code backend/ → tự reload (không build lại).
+# - node_modules ở volume riêng (Linux) để không hỏng native binary từ Windows.
+#
+# Mẹo: chỉ cần Postgres để chạy backend native ngoài Docker:
+#   docker compose -f docker-compose.dev.yml up -d db
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: urlshortener-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASS:-postgres}
+      POSTGRES_DB: ${DB_NAME:-urlshortener}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    image: node:22-alpine
+    container_name: urlshortener-backend
+    working_dir: /app
+    command: sh -c "npm install && npm run start:dev"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: development
+      PORT: 3000
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_USER: ${DB_USER:-postgres}
+      DB_PASS: ${DB_PASS:-postgres}
+      DB_NAME: ${DB_NAME:-urlshortener}
+      JWT_SECRET: ${JWT_SECRET:-change-me}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-change-me-too}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GOOGLE_CALLBACK_URL: ${GOOGLE_CALLBACK_URL:-http://localhost:3001/auth/google/callback}
+      FACEBOOK_APP_ID: ${FACEBOOK_APP_ID:-}
+      FACEBOOK_APP_SECRET: ${FACEBOOK_APP_SECRET:-}
+      FACEBOOK_CALLBACK_URL: ${FACEBOOK_CALLBACK_URL:-http://localhost:3001/auth/facebook/callback}
+      # Bật polling để Nest (chokidar) bắt thay đổi file qua bind mount
+      CHOKIDAR_USEPOLLING: "true"
+    volumes:
+      - ./:/app
+      - backend_node_modules:/app/node_modules
+    ports:
+      - "3001:3000"
+
+volumes:
+  pgdata:
+  backend_node_modules:
