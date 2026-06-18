@@ -15,6 +15,18 @@ function isPrefetch(req: Request): boolean {
   return /prefetch|prerender|preview/i.test(secPurpose + ' ' + purpose);
 }
 
+/**
+ * Bot quét link (đặc biệt `facebookexternalhit` của Facebook) ghé URL callback
+ * trước điều hướng thật → "tiêu" mất authorization code (chỉ dùng được 1 lần).
+ * Chặn chúng, không cho redeem code.
+ */
+function isLinkCrawler(req: Request): boolean {
+  const ua = String(req.headers['user-agent'] ?? '');
+  return /facebookexternalhit|facebookcatalog|meta-externalagent|facebookbot|bot\b|crawler|spider|slurp|preview/i.test(
+    ua,
+  );
+}
+
 @Injectable()
 export class FacebookAuthGuard extends AuthGuard('facebook') {
   private readonly logger = new Logger(FacebookAuthGuard.name);
@@ -32,11 +44,15 @@ export class FacebookAuthGuard extends AuthGuard('facebook') {
       );
     }
 
-    // Prefetch/preload sẽ "tiêu" mất code trước điều hướng thật → chặn lại,
-    // KHÔNG cho đổi token, để chỉ request điều hướng thật mới redeem code.
-    if (isPrefetch(req)) {
-      this.logger.warn('Bỏ qua request prefetch tới FB callback (không redeem code)');
-      throw new ForbiddenException('prefetch ignored');
+    // Prefetch/preload hoặc bot quét link (facebookexternalhit) sẽ "tiêu" mất
+    // code trước điều hướng thật → chặn lại, KHÔNG redeem code, để chỉ request
+    // điều hướng thật của người dùng mới đổi token.
+    if (isPrefetch(req) || isLinkCrawler(req)) {
+      this.logger.warn(
+        `Bỏ qua request không phải điều hướng thật tới FB callback ` +
+          `(ua=${String(req.headers['user-agent'] ?? '-').slice(0, 40)})`,
+      );
+      throw new ForbiddenException('non-navigation request ignored');
     }
 
     return super.canActivate(context);
