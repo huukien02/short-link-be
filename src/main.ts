@@ -6,7 +6,11 @@ import { HttpExceptionFilter } from './common/http-exception.filter';
 import { TransformInterceptor } from './common/transform.interceptor';
 
 async function bootstrap() {
-  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  // rawBody: true → giữ Buffer body gốc cho webhook Stripe (cần verify chữ ký),
+  // mà KHÔNG phá JSON parser toàn cục của các route khác.
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
+    rawBody: true,
+  });
 
   // Sau proxy (Render/Railway): tin x-forwarded-for để req.ip là IP client thật
   // (cần cho geo lookup) và để rate-limit theo đúng IP.

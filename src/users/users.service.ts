@@ -19,6 +19,31 @@ export class UsersService {
     return this.usersRepo.findOne({ where: { id } });
   }
 
+  findByStripeCustomerId(stripeCustomerId: string) {
+    return this.usersRepo.findOne({ where: { stripeCustomerId } });
+  }
+
+  /** Gắn Stripe Customer id cho user (tạo lazy lần đầu checkout). */
+  setStripeCustomerId(id: string, stripeCustomerId: string) {
+    return this.usersRepo.update({ id }, { stripeCustomerId });
+  }
+
+  /**
+   * Cập nhật trạng thái gói từ webhook Stripe (nguồn sự thật duy nhất).
+   * Không bao giờ đổi `plan` ở callback success_url — chỉ ở đây.
+   */
+  applySubscription(
+    stripeCustomerId: string,
+    data: {
+      plan: string;
+      stripeSubscriptionId: string | null;
+      subscriptionStatus: string | null;
+      currentPeriodEnd: Date | null;
+    },
+  ) {
+    return this.usersRepo.update({ stripeCustomerId }, data);
+  }
+
   /** Tạo hoặc cập nhật user từ thông tin OAuth (Google/Facebook). */
   async upsertOAuthUser(profile: OAuthProfile) {
     const idField: 'googleId' | 'facebookId' =

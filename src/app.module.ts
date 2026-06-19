@@ -10,6 +10,7 @@ import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { AnalyticsModule } from './analytics/analytics.module';
 import { AuthModule } from './auth/auth.module';
+import { BillingModule } from './billing/billing.module';
 import { buildTypeOrmOptions } from './config/typeorm.config';
 import { LinksModule } from './links/links.module';
 import { RedirectModule } from './redirect/redirect.module';
@@ -51,6 +52,7 @@ import { UsersModule } from './users/users.module';
     LinksModule,
     RedirectModule,
     AnalyticsModule,
+    BillingModule,
   ],
   controllers: [AppController],
   providers: [

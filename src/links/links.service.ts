@@ -1,5 +1,6 @@
 import {
   ConflictException,
+  ForbiddenException,
   Inject,
   Injectable,
   Logger,
@@ -10,7 +11,9 @@ import { InjectRepository } from '@nestjs/typeorm';
 import * as bcrypt from 'bcryptjs';
 import type { Redis } from 'ioredis';
 import { DataSource, QueryFailedError, Repository } from 'typeorm';
+import { planOf } from '../billing/plans.config';
 import { REDIS_CLIENT } from '../redis/redis.module';
+import { UsersService } from '../users/users.service';
 import { encodeBase62 } from './base62.util';
 import { CreateLinkDto } from './dto/create-link.dto';
 import { ListLinksDto } from './dto/list-links.dto';
@@ -34,6 +37,7 @@ export class LinksService implements OnModuleInit {
     private readonly dataSource: DataSource,
     @Inject(REDIS_CLIENT)
     private readonly redis: Redis,
+    private readonly users: UsersService,
   ) {}
 
   private slugKey(slug: string): string {
@@ -51,6 +55,8 @@ export class LinksService implements OnModuleInit {
   }
 
   async create(ownerId: string, dto: CreateLinkDto) {
+    await this.assertPlanAllows(ownerId, dto);
+
     const slug = dto.customSlug ?? (await this.generateSlug());
 
     const link = this.linksRepo.create({
@@ -229,6 +235,39 @@ export class LinksService implements OnModuleInit {
   /** Tăng click count atomic (không load entity). */
   incrementClick(id: string) {
     return this.linksRepo.increment({ id }, 'clickCount', 1);
+  }
+
+  /**
+   * Chặn vi phạm giới hạn gói khi tạo link. Giới hạn lấy từ `plans.config`
+   * theo `user.plan` (do webhook Stripe cập nhật): số link tối đa,
+   * cho phép custom slug / password hay không.
+   */
+  private async assertPlanAllows(
+    ownerId: string,
+    dto: CreateLinkDto,
+  ): Promise<void> {
+    const user = await this.users.findById(ownerId);
+    const plan = planOf(user?.plan);
+
+    if (dto.customSlug && !plan.customSlug) {
+      throw new ForbiddenException(
+        `Custom slug không có ở gói ${plan.name}. Nâng cấp để dùng.`,
+      );
+    }
+    if (dto.password && !plan.password) {
+      throw new ForbiddenException(
+        `Bảo vệ bằng mật khẩu không có ở gói ${plan.name}. Nâng cấp để dùng.`,
+      );
+    }
+
+    if (plan.maxLinks !== null) {
+      const count = await this.linksRepo.count({ where: { ownerId } });
+      if (count >= plan.maxLinks) {
+        throw new ForbiddenException(
+          `Gói ${plan.name} tối đa ${plan.maxLinks} link. Nâng cấp để tạo thêm.`,
+        );
+      }
+    }
   }
 
   /** Sinh slug Base62 từ Postgres sequence — không trùng, không cần check DB. */

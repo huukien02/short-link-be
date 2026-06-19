@@ -5,6 +5,7 @@ export interface AuthUser {
   email: string;
   name: string | null;
   avatar: string | null;
+  plan: string;
 }
 
 /** Lấy user đã xác thực từ request (do JwtStrategy.validate gắn vào). */
