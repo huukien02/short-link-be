@@ -111,6 +111,25 @@ export class LinksService implements OnModuleInit {
     return this.linksRepo.findOne({ where: { slug } });
   }
 
+  /**
+   * Đánh dấu inactive các link đã hết hạn (quá `expiresAt` hoặc chạm `maxClicks`).
+   * Chạy theo lịch (xem LinksCleanupService). Trả về số link bị tắt.
+   * Dùng UPDATE thẳng (set-based), không load entity — rẻ và atomic.
+   */
+  async deactivateExpired(): Promise<number> {
+    const result = await this.linksRepo
+      .createQueryBuilder()
+      .update(Link)
+      .set({ isActive: false })
+      .where('"isActive" = true')
+      .andWhere(
+        '(("expiresAt" IS NOT NULL AND "expiresAt" < now()) OR ' +
+          '("maxClicks" IS NOT NULL AND "clickCount" >= "maxClicks"))',
+      )
+      .execute();
+    return result.affected ?? 0;
+  }
+
   /** Tăng click count atomic (không load entity). */
   incrementClick(id: string) {
     return this.linksRepo.increment({ id }, 'clickCount', 1);
