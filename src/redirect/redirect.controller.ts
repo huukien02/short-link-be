@@ -116,6 +116,7 @@ export class RedirectController {
     this.redirect.recordClick(link.id, {
       referrer: req.headers['referer'] ?? null,
       userAgent: req.headers['user-agent'] ?? null,
+      ip: req.ip ?? null,
     });
   }
 }

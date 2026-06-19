@@ -1,12 +1,16 @@
 import {
   ConflictException,
+  Inject,
   Injectable,
+  Logger,
   NotFoundException,
   OnModuleInit,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import * as bcrypt from 'bcryptjs';
+import type { Redis } from 'ioredis';
 import { DataSource, QueryFailedError, Repository } from 'typeorm';
+import { REDIS_CLIENT } from '../redis/redis.module';
 import { encodeBase62 } from './base62.util';
 import { CreateLinkDto } from './dto/create-link.dto';
 import { ListLinksDto } from './dto/list-links.dto';
@@ -17,11 +21,24 @@ const PG_UNIQUE_VIOLATION = '23505';
 
 @Injectable()
 export class LinksService implements OnModuleInit {
+  private readonly logger = new Logger(LinksService.name);
+
+  /** TTL cache slug (giây). Ngắn để giới hạn lệch clickCount/maxClicks. */
+  private readonly SLUG_TTL = 60;
+  /** TTL cache âm (slug không tồn tại) — chống dò slug rác. */
+  private readonly NEG_TTL = 10;
+
   constructor(
     @InjectRepository(Link)
     private readonly linksRepo: Repository<Link>,
     private readonly dataSource: DataSource,
+    @Inject(REDIS_CLIENT)
+    private readonly redis: Redis,
   ) {}
+
+  private slugKey(slug: string): string {
+    return `link:${slug}`;
+  }
 
   /**
    * Đảm bảo sequence sinh slug tồn tại — idempotent.
@@ -97,24 +114,98 @@ export class LinksService implements OnModuleInit {
         : null;
     }
 
-    return this.linksRepo.save(link);
+    const saved = await this.linksRepo.save(link);
+    await this.invalidateSlug(saved.slug); // tránh phục vụ bản cũ từ cache
+    return saved;
   }
 
   async remove(ownerId: string, id: string) {
     const link = await this.findOneOwned(ownerId, id);
+    const slug = link.slug; // lấy trước khi remove
     await this.linksRepo.remove(link);
+    await this.invalidateSlug(slug);
     return { id };
   }
 
-  /** Dùng cho redirect — tra theo slug. */
-  findBySlug(slug: string) {
-    return this.linksRepo.findOne({ where: { slug } });
+  /**
+   * Dùng cho redirect (đường nóng) — tra theo slug với cache-aside qua Redis.
+   * Redis chỉ là lớp tăng tốc: mọi lỗi Redis đều nuốt và fallback về DB,
+   * KHÔNG để Redis down làm sập redirect.
+   */
+  async findBySlug(slug: string): Promise<Link | null> {
+    const key = this.slugKey(slug);
+
+    // 1) Thử cache
+    try {
+      const cached = await this.redis.get(key);
+      if (cached !== null) {
+        if (cached === '') return null; // cache âm: slug không tồn tại
+        return this.deserialize(cached);
+      }
+    } catch (err) {
+      this.logger.warn(`Redis GET lỗi, fallback DB: ${err}`);
+    }
+
+    // 2) Miss → DB
+    const link = await this.linksRepo.findOne({ where: { slug } });
+
+    // 3) Ghi lại cache (best-effort, không chặn nếu Redis lỗi)
+    try {
+      if (!link) {
+        await this.redis.set(key, '', 'EX', this.NEG_TTL);
+      } else {
+        await this.redis.set(key, this.serialize(link), 'EX', this.SLUG_TTL);
+      }
+    } catch (err) {
+      this.logger.warn(`Redis SET lỗi (bỏ qua): ${err}`);
+    }
+
+    return link;
+  }
+
+  /** Xoá cache slug — gọi khi link thay đổi (sửa/xóa/tắt). */
+  async invalidateSlug(slug: string): Promise<void> {
+    await this.invalidateSlugs([slug]);
+  }
+
+  /** Xoá cache nhiều slug trong 1 lệnh DEL — dùng cho cron dọn link hết hạn. */
+  async invalidateSlugs(slugs: string[]): Promise<void> {
+    if (slugs.length === 0) return;
+    try {
+      await this.redis.del(...slugs.map((s) => this.slugKey(s)));
+    } catch (err) {
+      this.logger.warn(`Redis DEL lỗi (bỏ qua): ${err}`);
+    }
+  }
+
+  /** Chỉ cache các field redirect cần — bỏ qua quan hệ owner/events. */
+  private serialize(link: Link): string {
+    return JSON.stringify({
+      id: link.id,
+      slug: link.slug,
+      targetUrl: link.targetUrl,
+      passwordHash: link.passwordHash,
+      expiresAt: link.expiresAt ? link.expiresAt.toISOString() : null,
+      maxClicks: link.maxClicks,
+      clickCount: link.clickCount,
+      isActive: link.isActive,
+    });
+  }
+
+  /** Dựng lại entity-shape từ cache (giữ expiresAt là Date — controller gọi .getTime()). */
+  private deserialize(raw: string): Link {
+    const o = JSON.parse(raw) as Record<string, unknown>;
+    return this.linksRepo.create({
+      ...o,
+      expiresAt: o.expiresAt ? new Date(o.expiresAt as string) : null,
+    });
   }
 
   /**
    * Đánh dấu inactive các link đã hết hạn (quá `expiresAt` hoặc chạm `maxClicks`).
    * Chạy theo lịch (xem LinksCleanupService). Trả về số link bị tắt.
    * Dùng UPDATE thẳng (set-based), không load entity — rẻ và atomic.
+   * `RETURNING slug` để biết link nào vừa tắt → xoá cache, tránh redirect bản cũ tới hết TTL.
    */
   async deactivateExpired(): Promise<number> {
     const result = await this.linksRepo
@@ -126,8 +217,13 @@ export class LinksService implements OnModuleInit {
         '(("expiresAt" IS NOT NULL AND "expiresAt" < now()) OR ' +
           '("maxClicks" IS NOT NULL AND "clickCount" >= "maxClicks"))',
       )
+      .returning(['slug'])
       .execute();
-    return result.affected ?? 0;
+
+    const slugs = (result.raw as Array<{ slug: string }>).map((r) => r.slug);
+    await this.invalidateSlugs(slugs);
+
+    return result.affected ?? slugs.length;
   }
 
   /** Tăng click count atomic (không load entity). */

@@ -1,11 +1,12 @@
+import { InjectQueue } from '@nestjs/bullmq';
 import { Injectable, Logger } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
-import { ClickEvent } from '../links/click-event.entity';
+import { Queue } from 'bullmq';
+import { CLICK_EVENTS_QUEUE, ClickJobData } from './click-events.queue';
 
 export interface ClickContext {
   referrer?: string | null;
   userAgent?: string | null;
+  ip?: string | null;
 }
 
 @Injectable()
@@ -13,26 +14,33 @@ export class RedirectService {
   private readonly logger = new Logger(RedirectService.name);
 
   constructor(
-    @InjectRepository(ClickEvent)
-    private readonly eventsRepo: Repository<ClickEvent>,
+    @InjectQueue(CLICK_EVENTS_QUEUE)
+    private readonly queue: Queue<ClickJobData>,
   ) {}
 
   /**
-   * Ghi click event — gọi fire-and-forget, KHÔNG để chặn redirect.
-   * Phase 3: thay bằng queue (BullMQ) + enrich geo/device.
+   * Đẩy click event vào queue — fire-and-forget, KHÔNG chặn redirect.
+   * Worker (ClickEventsProcessor) sẽ ghi vào DB + (sau này) enrich geo/device.
    */
   recordClick(linkId: string, ctx: ClickContext): void {
-    const event = this.eventsRepo.create({
-      linkId,
-      referrer: ctx.referrer ?? null,
-      // device/browser/country sẽ enrich ở Phase 3
-      device: null,
-      browser: null,
-      country: null,
-    });
-
-    void this.eventsRepo.save(event).catch((err) => {
-      this.logger.error(`Ghi click event thất bại: ${err}`);
-    });
+    void this.queue
+      .add(
+        'click',
+        {
+          linkId,
+          referrer: ctx.referrer ?? null,
+          userAgent: ctx.userAgent ?? null,
+          ip: ctx.ip ?? null,
+        },
+        {
+          removeOnComplete: 1000, // giữ tối đa 1000 job xong, tránh phình Redis
+          removeOnFail: 5000,
+          attempts: 3, // retry nếu worker lỗi
+          backoff: { type: 'exponential', delay: 1000 },
+        },
+      )
+      .catch((err) => {
+        this.logger.error(`Enqueue click event thất bại: ${err}`);
+      });
   }
 }
